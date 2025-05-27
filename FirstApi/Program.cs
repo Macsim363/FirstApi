@@ -4,46 +4,87 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.OpenApi.Models;
 using System.Threading.Tasks;
+
 var builder = WebApplication.CreateBuilder(args);
+
+
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddDbContext<TodoDb>(opt => opt.UseInMemoryDatabase("TodoList"));
-builder.Services.AddScoped<AuthFilter>();
-builder.Services.AddOpenApiDocument(config =>
+builder.Services.AddSwaggerGen(c =>
 {
-    config.Title = "My API";
-    config.Version = "v1";
+    c.SwaggerDoc("v1", new() { Title = "My API", Version = "v1" });
 
     
-    config.AddSecurity("cookieAuth", Enumerable.Empty<string>(), new NSwag.OpenApiSecurityScheme
+    c.AddSecurityDefinition("cookieAuth", new OpenApiSecurityScheme
     {
-        Type = NSwag.OpenApiSecuritySchemeType.ApiKey,
         Name = "Cookie",
-        In = NSwag.OpenApiSecurityApiKeyLocation.Header,
+        Type = SecuritySchemeType.ApiKey,
+        In = ParameterLocation.Cookie,
         Description = "Cookie-based authentication"
     });
 
-    config.OperationProcessors.Add(
-        new NSwag.Generation.Processors.Security.AspNetCoreOperationSecurityScopeProcessor("cookieAuth"));
-});
-builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
-    .AddCookie(options =>
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
     {
-        options.LoginPath = "/tasks/login"; 
-        options.Cookie.HttpOnly = true;
-        options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
-        options.Cookie.SameSite = SameSiteMode.Lax;
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference 
+                { 
+                    Type = ReferenceType.SecurityScheme, 
+                    Id = "cookieAuth" 
+                }
+            },
+            new string[] { }
+        }
     });
+});
+
+builder.Services.AddDbContext<TodoDb>(opt => opt.UseInMemoryDatabase("TodoList"));
+builder.Services.AddScoped<AuthFilter>();
+
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+   .AddCookie(options => 
+{
+    options.Cookie.SameSite = SameSiteMode.Lax;
+    options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+    options.Cookie.HttpOnly = true;
+    options.Cookie.Name = "MyApp.AuthCookie";
+    
+    
+    options.Events.OnRedirectToLogin = context =>
+    {
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        return Task.CompletedTask;
+    };
+    
+    options.Events.OnRedirectToAccessDenied = context =>
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        return Task.CompletedTask;
+    };
+});
 
 builder.Services.AddAuthorization();
 
 var app = builder.Build();
 
-var FirstTaskGroup = app.MapGroup("/todoitems").RequireAuthorization().AddEndpointFilter<AuthFilter>();
-var SeccondTaskGroup = app.MapGroup("/tasks");
+
+app.UseSwagger();
+app.UseSwaggerUI();
+
+app.UseAuthentication();
+app.UseAuthorization();
 
 
-SeccondTaskGroup.MapPost("/register", (User user) =>
+var FirstTaskGroup = app.MapGroup("/todoitems")
+    .RequireAuthorization()
+    .AddEndpointFilter<AuthFilter>();
+
+var SecondTaskGroup = app.MapGroup("/tasks");
+
+
+SecondTaskGroup.MapPost("/register", (User user) =>
 {
     if (string.IsNullOrWhiteSpace(user.Username) || string.IsNullOrWhiteSpace(user.Password))
         return Results.BadRequest(new { message = "Username and password are required" });
@@ -54,10 +95,9 @@ SeccondTaskGroup.MapPost("/register", (User user) =>
     UserRepository.Add(user);
     user.Password = string.Empty;
     return Results.Created($"/tasks/{user.Id}", user);
-});
+}).WithTags("tasks");
 
-
-SeccondTaskGroup.MapPost("/login", async (User loginModel, HttpContext httpContext) =>
+SecondTaskGroup.MapPost("/login", async (User loginModel, HttpContext httpContext) =>
 {
     var user = UserRepository.Find(loginModel.Username);
 
@@ -78,28 +118,27 @@ SeccondTaskGroup.MapPost("/login", async (User loginModel, HttpContext httpConte
 
     user.Password = string.Empty;
     return Results.Ok(new { user });
-});
+}).WithTags("tasks");
 
-
-SeccondTaskGroup.MapPost("/logout", async (HttpContext httpContext) =>
+SecondTaskGroup.MapPost("/logout", async (HttpContext httpContext) =>
 {
     await httpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
     return Results.Ok(new { message = "Logged out" });
-});
+}).WithTags("tasks");
 
-
+// Todo items endpoints (require authorization)
 FirstTaskGroup.MapGet("/", async (TodoDb db) =>
-    await db.Todos.ToListAsync());
+    await db.Todos.ToListAsync()).WithTags("todoitems");
 
 FirstTaskGroup.MapGet("/{id}", async (int id, TodoDb db) =>
-    await db.Todos.FindAsync(id) is Todo todo ? Results.Ok(todo) : Results.NotFound());
+    await db.Todos.FindAsync(id) is Todo todo ? Results.Ok(todo) : Results.NotFound()).WithTags("todoitems");
 
 FirstTaskGroup.MapPost("/", async (Todo todo, TodoDb db) =>
 {
     db.Todos.Add(todo);
     await db.SaveChangesAsync();
     return Results.Created($"/todoitems/{todo.Id}", todo);
-});
+}).WithTags("todoitems");
 
 FirstTaskGroup.MapPut("/{id}", async (int id, Todo inputTodo, TodoDb db) =>
 {
@@ -111,7 +150,7 @@ FirstTaskGroup.MapPut("/{id}", async (int id, Todo inputTodo, TodoDb db) =>
     await db.SaveChangesAsync();
 
     return Results.NoContent();
-});
+}).WithTags("todoitems");
 
 FirstTaskGroup.MapDelete("/{id}", async (int id, TodoDb db) =>
 {
@@ -122,21 +161,15 @@ FirstTaskGroup.MapDelete("/{id}", async (int id, TodoDb db) =>
     await db.SaveChangesAsync();
 
     return Results.NoContent();
-});
+}).WithTags("todoitems");
 
-
-app.UseOpenApi();
-app.UseSwaggerUi();
-
-
-app.UseAuthentication();
-app.UseAuthorization();
-
-app.MapGet("/", () => "Hello World!");
+// Root endpoint
+app.MapGet("/", () => "Hello World!").WithTags("todoitems");
 
 app.Run();
 
 
+// Models and supporting classes
 
 public class User
 {
@@ -183,11 +216,9 @@ public class AuthFilter : IEndpointFilter
 
         if (!httpContext.User.Identity?.IsAuthenticated ?? true)
         {
-            
             return Results.Unauthorized();
         }
 
-        
         return await next(context);
     }
 }
